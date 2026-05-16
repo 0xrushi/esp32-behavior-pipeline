@@ -1,0 +1,438 @@
+#include "esp_camera.h"
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <WebServer.h>
+#include <Preferences.h>
+
+
+#define PWDN_GPIO_NUM     32
+#define RESET_GPIO_NUM    -1
+#define XCLK_GPIO_NUM      0
+#define SIOD_GPIO_NUM     26
+#define SIOC_GPIO_NUM     27
+
+#define Y9_GPIO_NUM       35
+#define Y8_GPIO_NUM       34
+#define Y7_GPIO_NUM       39
+#define Y6_GPIO_NUM       36
+#define Y5_GPIO_NUM       21
+#define Y4_GPIO_NUM       19
+#define Y3_GPIO_NUM       18
+#define Y2_GPIO_NUM        5
+#define VSYNC_GPIO_NUM    25
+#define HREF_GPIO_NUM     23
+#define PCLK_GPIO_NUM     22
+
+
+// ===========================
+// WiFi credentials
+// ===========================
+const char *ssid = "CocaineWolf";
+const char *password = "Huskies@2021";
+
+// ===========================
+// Built-in white LED
+// ESP32-CAM usually uses GPIO 4
+// ===========================
+#ifndef LED_GPIO_NUM
+#define LED_GPIO_NUM 4
+#endif
+
+// ===========================
+// Config storage + web server
+// ===========================
+Preferences prefs;
+WebServer server(80);
+
+String pcHost = "192.168.1.153";
+int pcPort = 8000;
+String framePath = "/frame";
+String pingPath = "/ping";
+
+String pcFrameUrl;
+String pcPingUrl;
+
+bool streamingOn = true;
+unsigned long frameIntervalMs = 250;
+unsigned long pingIntervalMs = 2000;
+unsigned long statusBlinkIntervalMs = 5000;
+
+bool pcConnected = false;
+
+unsigned long lastFrameMs = 0;
+unsigned long lastPingMs = 0;
+unsigned long lastStatusBlinkMs = 0;
+
+// ===========================
+// LED helpers
+// ===========================
+void ledOn() {
+  digitalWrite(LED_GPIO_NUM, HIGH);
+}
+
+void ledOff() {
+  digitalWrite(LED_GPIO_NUM, LOW);
+}
+
+void blinkLed(int count, int onMs, int offMs) {
+  for (int i = 0; i < count; i++) {
+    ledOn();
+    delay(onMs);
+    ledOff();
+    delay(offMs);
+  }
+}
+
+// 1 blink  = PC connected idle
+// 2 quick  = streaming active
+// 3 slow   = PC disconnected
+// 5 fast   = send/capture error
+void showStatusPattern() {
+  if (!pcConnected) {
+    blinkLed(3, 250, 250);
+    Serial.println("[STATUS] PC DISCONNECTED");
+  } else if (streamingOn) {
+    blinkLed(2, 80, 80);
+    Serial.println("[STATUS] STREAMING ACTIVE");
+  } else {
+    blinkLed(1, 150, 150);
+    Serial.println("[STATUS] PC CONNECTED, STREAMING OFF");
+  }
+}
+
+// ===========================
+// Config helpers
+// ===========================
+void rebuildUrls() {
+  pcFrameUrl = "http://" + pcHost + ":" + String(pcPort) + framePath;
+  pcPingUrl = "http://" + pcHost + ":" + String(pcPort) + pingPath;
+
+  Serial.println("[CONFIG] URLs rebuilt:");
+  Serial.println("[CONFIG] Frame URL: " + pcFrameUrl);
+  Serial.println("[CONFIG] Ping URL: " + pcPingUrl);
+}
+
+void loadConfig() {
+  prefs.begin("camcfg", true);
+
+  pcHost = prefs.getString("host", "192.168.1.153");
+  pcPort = prefs.getInt("port", 8000);
+  framePath = prefs.getString("frame", "/frame");
+  pingPath = prefs.getString("ping", "/ping");
+  streamingOn = prefs.getBool("stream", true);
+  frameIntervalMs = prefs.getULong("frameMs", 250);
+
+  prefs.end();
+
+  rebuildUrls();
+}
+
+void saveConfig() {
+  prefs.begin("camcfg", false);
+
+  prefs.putString("host", pcHost);
+  prefs.putInt("port", pcPort);
+  prefs.putString("frame", framePath);
+  prefs.putString("ping", pingPath);
+  prefs.putBool("stream", streamingOn);
+  prefs.putULong("frameMs", frameIntervalMs);
+
+  prefs.end();
+
+  rebuildUrls();
+}
+
+// ===========================
+// Web config page
+// ===========================
+void handleConfigPage() {
+  String checked = streamingOn ? "checked" : "";
+
+  String html =
+    "<!DOCTYPE html><html><head>"
+    "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+    "<title>ESP32 Camera Config</title>"
+    "<style>"
+    "body{font-family:Arial;margin:30px;background:#111;color:#eee;}"
+    "input{width:100%;padding:10px;margin:8px 0;background:#222;color:#fff;border:1px solid #555;}"
+    "button{padding:12px 20px;background:#2d7ef7;color:white;border:0;border-radius:6px;}"
+    ".card{max-width:520px;background:#1b1b1b;padding:20px;border-radius:10px;}"
+    ".status{background:#222;padding:10px;margin-top:15px;border-radius:6px;}"
+    "</style></head><body>"
+    "<div class='card'>"
+    "<h2>ESP32 Camera Config</h2>"
+
+    "<form action='/save' method='POST'>"
+    "PC Host/IP:<br>"
+    "<input name='host' value='" + pcHost + "'>"
+
+    "PC Port:<br>"
+    "<input name='port' type='number' value='" + String(pcPort) + "'>"
+
+    "Frame Path:<br>"
+    "<input name='frame' value='" + framePath + "'>"
+
+    "Ping Path:<br>"
+    "<input name='ping' value='" + pingPath + "'>"
+
+    "Frame Interval ms:<br>"
+    "<input name='frameMs' type='number' value='" + String(frameIntervalMs) + "'>"
+
+    "<label>"
+    "<input type='checkbox' name='stream' " + checked + "> Streaming Enabled"
+    "</label><br><br>"
+
+    "<button type='submit'>Save Config</button>"
+    "</form>"
+
+    "<div class='status'>"
+    "<b>Current Frame URL:</b><br>" + pcFrameUrl + "<br><br>"
+    "<b>Current Ping URL:</b><br>" + pcPingUrl + "<br><br>"
+    "<b>PC Connected:</b> " + String(pcConnected ? "YES" : "NO") + "<br>"
+    "<b>Streaming:</b> " + String(streamingOn ? "ON" : "OFF") +
+    "</div>"
+
+    "<p><a style='color:#7ab7ff' href='/status'>JSON Status</a></p>"
+    "</div></body></html>";
+
+  server.send(200, "text/html", html);
+}
+
+void handleSave() {
+  if (server.hasArg("host")) pcHost = server.arg("host");
+  if (server.hasArg("port")) pcPort = server.arg("port").toInt();
+  if (server.hasArg("frame")) framePath = server.arg("frame");
+  if (server.hasArg("ping")) pingPath = server.arg("ping");
+  if (server.hasArg("frameMs")) frameIntervalMs = server.arg("frameMs").toInt();
+
+  streamingOn = server.hasArg("stream");
+
+  if (!framePath.startsWith("/")) framePath = "/" + framePath;
+  if (!pingPath.startsWith("/")) pingPath = "/" + pingPath;
+  if (pcPort <= 0) pcPort = 8000;
+  if (frameIntervalMs < 100) frameIntervalMs = 100;
+
+  saveConfig();
+
+  server.sendHeader("Location", "/config");
+  server.send(303);
+}
+
+void handleStatus() {
+  String json = "{";
+  json += "\"pcConnected\":" + String(pcConnected ? "true" : "false") + ",";
+  json += "\"streamingOn\":" + String(streamingOn ? "true" : "false") + ",";
+  json += "\"pcFrameUrl\":\"" + pcFrameUrl + "\",";
+  json += "\"pcPingUrl\":\"" + pcPingUrl + "\",";
+  json += "\"frameIntervalMs\":" + String(frameIntervalMs) + ",";
+  json += "\"espIp\":\"" + WiFi.localIP().toString() + "\"";
+  json += "}";
+
+  server.send(200, "application/json", json);
+}
+
+void startConfigServer() {
+  server.on("/", HTTP_GET, handleConfigPage);
+  server.on("/config", HTTP_GET, handleConfigPage);
+  server.on("/save", HTTP_POST, handleSave);
+  server.on("/status", HTTP_GET, handleStatus);
+
+  server.begin();
+  Serial.println("[WEB] Config server started");
+}
+
+// ===========================
+// PC communication
+// ===========================
+bool checkPcConnected() {
+  HTTPClient http;
+  http.begin(pcPingUrl.c_str());
+  http.setTimeout(1000);
+
+  int code = http.GET();
+  http.end();
+
+  Serial.printf("[PING] HTTP code: %d\n", code);
+
+  return code == 200;
+}
+
+bool sendFrameToPc() {
+  camera_fb_t *fb = esp_camera_fb_get();
+
+  if (!fb) {
+    Serial.println("[ERROR] Camera capture failed");
+    blinkLed(5, 50, 50);
+    return false;
+  }
+
+  size_t frameSize = fb->len;
+
+  HTTPClient http;
+  http.begin(pcFrameUrl.c_str());
+  http.addHeader("Content-Type", "image/jpeg");
+  http.setTimeout(3000);
+
+  int code = http.POST(fb->buf, fb->len);
+
+  http.end();
+  esp_camera_fb_return(fb);
+
+  if (code == 200) {
+    Serial.printf("[FRAME] Sent %u bytes\n", (unsigned int)frameSize);
+    return true;
+  }
+
+  Serial.printf("[ERROR] Frame POST failed. HTTP code: %d\n", code);
+  blinkLed(5, 50, 50);
+  return false;
+}
+
+// ===========================
+// Camera setup
+// ===========================
+bool setupCamera() {
+  camera_config_t config;
+
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+
+  config.pin_sccb_sda = SIOD_GPIO_NUM;
+  config.pin_sccb_scl = SIOC_GPIO_NUM;
+
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_JPEG;
+
+  // Small packets
+  config.frame_size = FRAMESIZE_QQVGA;   // 160x120
+  config.jpeg_quality = 18;              // higher = smaller file
+  config.fb_count = 1;
+  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+
+  if (psramFound()) {
+    config.fb_location = CAMERA_FB_IN_PSRAM;
+    config.fb_count = 2;
+    config.grab_mode = CAMERA_GRAB_LATEST;
+    Serial.println("[CAMERA] PSRAM found");
+  } else {
+    config.fb_location = CAMERA_FB_IN_DRAM;
+    Serial.println("[CAMERA] No PSRAM, using DRAM");
+  }
+
+  esp_err_t err = esp_camera_init(&config);
+
+  if (err != ESP_OK) {
+    Serial.printf("[FATAL] Camera init failed: 0x%x\n", err);
+    return false;
+  }
+
+  sensor_t *s = esp_camera_sensor_get();
+
+  if (s) {
+    s->set_framesize(s, FRAMESIZE_QQVGA);
+    s->set_quality(s, 18);
+  }
+
+  Serial.println("[CAMERA] Initialized");
+  return true;
+}
+
+// ===========================
+// Main setup
+// ===========================
+void setup() {
+  Serial.begin(115200);
+  Serial.setDebugOutput(true);
+  Serial.println();
+
+  pinMode(LED_GPIO_NUM, OUTPUT);
+
+  ledOn();
+  delay(1000);
+  ledOff();
+
+  Serial.println("[BOOT] Starting ESP32 camera streamer");
+
+  if (!setupCamera()) {
+    while (true) {
+      blinkLed(10, 50, 50);
+      delay(1000);
+    }
+  }
+
+  WiFi.begin(ssid, password);
+  WiFi.setSleep(false);
+
+  Serial.print("[WIFI] Connecting");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+    blinkLed(1, 50, 50);
+  }
+
+  Serial.println();
+  Serial.println("[WIFI] Connected");
+  Serial.print("[WIFI] ESP32 IP: ");
+  Serial.println(WiFi.localIP());
+
+  loadConfig();
+  startConfigServer();
+
+  Serial.println("[READY] Open this in browser:");
+  Serial.print("http://");
+  Serial.print(WiFi.localIP());
+  Serial.println("/config");
+}
+
+// ===========================
+// Main loop
+// ===========================
+void loop() {
+  server.handleClient();
+
+  unsigned long now = millis();
+
+  if (now - lastPingMs >= pingIntervalMs) {
+    lastPingMs = now;
+    pcConnected = checkPcConnected();
+
+    if (pcConnected) {
+      Serial.println("[PING] PC reachable");
+    } else {
+      Serial.println("[PING] PC unreachable");
+    }
+  }
+
+  if (streamingOn && pcConnected && now - lastFrameMs >= frameIntervalMs) {
+    lastFrameMs = now;
+
+    bool ok = sendFrameToPc();
+
+    if (!ok) {
+      pcConnected = false;
+    }
+  }
+
+  if (now - lastStatusBlinkMs >= statusBlinkIntervalMs) {
+    lastStatusBlinkMs = now;
+    showStatusPattern();
+  }
+}

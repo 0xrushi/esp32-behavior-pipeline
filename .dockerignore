@@ -1,0 +1,24 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Data and logs
+frames/
+outputs/
+camera_events.db
+
+# Project specific
+tests/
+.pytest_cache/
+.git/
+.env
+
+# uv
+.uv/

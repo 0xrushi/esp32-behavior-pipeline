@@ -1,0 +1,13 @@
+services:
+  receiver:
+    build: .
+    labels:
+      - "esp32=true"
+    # Using host network ensures seamless communication with local 192.168.x.x devices (like an ESP32)
+    network_mode: "host"
+    volumes:
+      - ./frames:/app/frames
+      - ./outputs:/app/outputs
+      - ./camera_events.db:/app/camera_events.db
+      - ./.env:/app/.env
+    restart: unless-stopped
