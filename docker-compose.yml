@@ -1,13 +1,36 @@
 services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    labels:
+      - "esp32=true"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-esp32}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-esp32}
+      POSTGRES_DB: ${POSTGRES_DB:-esp32_events}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   receiver:
     build: .
     labels:
       - "esp32=true"
-    # Using host network ensures seamless communication with local 192.168.x.x devices (like an ESP32)
+    # host network: reaches ESP32 devices on LAN
     network_mode: "host"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://esp32:esp32@localhost:5433/esp32_events}
     volumes:
       - ./frames:/app/frames
       - ./outputs:/app/outputs
-      - ./camera_events.db:/app/camera_events.db
       - ./.env:/app/.env
     restart: unless-stopped
+
+volumes:
+  postgres-data:

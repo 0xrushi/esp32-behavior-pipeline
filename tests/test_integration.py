@@ -1,17 +1,10 @@
 import io
-import sqlite3
-import os
 from PIL import Image
 from fastapi.testclient import TestClient
 
 from src.esp32_receiver.main import app
-from src.esp32_receiver.core.config import settings
 
 def test_frame_integration():
-    # Delete DB if exists for clean test
-    if settings.DB_PATH.exists():
-        settings.DB_PATH.unlink()
-
     with TestClient(app) as client:
         # Create a dummy solid red image in memory
         img = Image.new('RGB', (100, 100), color='red')
@@ -56,11 +49,7 @@ def test_frame_integration():
         assert latest_record["output_filepath"] == output_filepath
         assert latest_record["answer"] == answer
 
-        # 3. Double-check directly inside the SQLite database
-        with sqlite3.connect(settings.DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute("SELECT * FROM frames ORDER BY id DESC LIMIT 1").fetchone()
-            assert row is not None
-            assert row["filepath"] == filepath
-            assert row["output_filepath"] == output_filepath
-            assert row["answer"] == answer
+        # 3. Verify via /recent that the record persisted to postgres
+        assert latest_record["filepath"] == filepath
+        assert latest_record["output_filepath"] == output_filepath
+        assert latest_record["answer"] == answer

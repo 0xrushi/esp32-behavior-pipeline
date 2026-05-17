@@ -1,58 +1,62 @@
-import aiosqlite
+import asyncpg
 from datetime import datetime
 from src.esp32_receiver.core.config import settings
 
+_pool: asyncpg.Pool | None = None
+
+
 async def init_db():
-    async with aiosqlite.connect(settings.DB_PATH) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS frames (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                filepath TEXT NOT NULL,
+    global _pool
+    _pool = await asyncpg.create_pool(settings.DATABASE_URL, min_size=1, max_size=5)
+    async with _pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS esp32_frames (
+                id              SERIAL PRIMARY KEY,
+                timestamp       TIMESTAMPTZ NOT NULL,
+                filepath        TEXT NOT NULL,
                 output_filepath TEXT NOT NULL,
-                answer INTEGER NOT NULL,
-                cumulated_time REAL NOT NULL,
-                notes TEXT
+                answer          BOOLEAN NOT NULL,
+                cumulated_time  REAL NOT NULL,
+                notes           TEXT
             )
         """)
-        await db.commit()
+
+
+async def close_db():
+    global _pool
+    if _pool:
+        await _pool.close()
+        _pool = None
+
 
 async def write_db(filepath: str, output_filepath: str, answer: bool, cumulated_time: float, notes: str):
-    async with aiosqlite.connect(settings.DB_PATH) as db:
-        await db.execute("""
-            INSERT INTO frames (
-                timestamp,
-                filepath,
-                output_filepath,
-                answer,
-                cumulated_time,
-                notes
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            datetime.now().isoformat(timespec="seconds"),
+    async with _pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO esp32_frames (timestamp, filepath, output_filepath, answer, cumulated_time, notes)
+            VALUES ($1, $2, $3, $4, $5, $6)
+        """,
+            datetime.now(),
             filepath,
             output_filepath,
-            int(answer),
+            answer,
             cumulated_time,
-            notes
-        ))
-        await db.commit()
+            notes,
+        )
+
 
 async def get_recent_frames(limit: int = 20):
-    async with aiosqlite.connect(settings.DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM frames ORDER BY id DESC LIMIT ?", (limit,)) as cursor:
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM esp32_frames ORDER BY id DESC LIMIT $1", limit
+        )
+        return [dict(r) for r in rows]
+
 
 async def get_stats():
-    async with aiosqlite.connect(settings.DB_PATH) as db:
-        async with db.execute("SELECT COUNT(*) FROM frames") as cursor:
-            total_frames = (await cursor.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM frames WHERE answer = 1") as cursor:
-            positive_detections = (await cursor.fetchone())[0]
+    async with _pool.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM esp32_frames")
+        positive = await conn.fetchval("SELECT COUNT(*) FROM esp32_frames WHERE answer = true")
         return {
-            "total_frames_analyzed": total_frames,
-            "positive_phone_detections": positive_detections
+            "total_frames_analyzed": total,
+            "positive_phone_detections": positive,
         }

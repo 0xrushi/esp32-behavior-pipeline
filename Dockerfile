@@ -39,10 +39,9 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 # Copy application code
 COPY src/ src/
-COPY weights/ weights/
 
 # Create directories for runtime data
-RUN mkdir -p frames outputs
+RUN mkdir -p frames outputs weights
 
 # Expose the application port
 EXPOSE 8000

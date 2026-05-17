@@ -8,8 +8,10 @@ class Settings(BaseSettings):
     # Storage settings
     FRAME_DIR: Path = Path("frames")
     OUTPUT_DIR: Path = Path("outputs")
-    DB_PATH: Path = Path("camera_events.db")
     WEIGHTS_PATH: Path = Path("weights/rf-detr-medium.pth")
+
+    # Database
+    DATABASE_URL: str = "postgres://esp32:esp32@localhost:5433/esp32_events"
     
     # Business logic settings
     PHONE_USAGE_THRESHOLD_SECONDS: int = 300  # 5 minutes

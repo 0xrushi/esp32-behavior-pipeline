@@ -1,12 +1,13 @@
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from src.esp32_receiver.api.routes import router
-from src.esp32_receiver.database.manager import init_db
+from src.esp32_receiver.database.manager import init_db, close_db
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     yield
+    await close_db()
 
 app = FastAPI(title="ESP32 Receiver", lifespan=lifespan)
 
