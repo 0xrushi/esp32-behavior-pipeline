@@ -44,7 +44,7 @@ COPY src/ src/
 RUN mkdir -p frames outputs weights
 
 # Expose the application port
-EXPOSE 8000
+EXPOSE 8003
 
 # Run the application
-CMD ["uvicorn", "esp32_receiver.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "esp32_receiver.main:app", "--host", "0.0.0.0", "--port", "8003"]

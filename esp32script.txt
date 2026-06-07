@@ -3,6 +3,8 @@
 #include <HTTPClient.h>
 #include <WebServer.h>
 #include <Preferences.h>
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
 
 
 #define PWDN_GPIO_NUM     32
@@ -28,7 +30,7 @@
 // WiFi credentials
 // ===========================
 const char *ssid = "CocaineWolf";
-const char *password = "Huskies@2021";
+const char *password = "";
 
 // ===========================
 // Built-in white LED
@@ -44,8 +46,8 @@ const char *password = "Huskies@2021";
 Preferences prefs;
 WebServer server(80);
 
-String pcHost = "192.168.1.153";
-int pcPort = 8000;
+String pcHost = "192.168.1.157";
+int pcPort = 8003;
 String framePath = "/frame";
 String pingPath = "/ping";
 
@@ -62,6 +64,47 @@ bool pcConnected = false;
 unsigned long lastFrameMs = 0;
 unsigned long lastPingMs = 0;
 unsigned long lastStatusBlinkMs = 0;
+
+// ===========================
+// Resolution config
+// ===========================
+int savedFrameSize = FRAMESIZE_QQVGA;
+
+framesize_t intToFrameSize(int v) {
+  switch (v) {
+    case FRAMESIZE_QQVGA: return FRAMESIZE_QQVGA;
+    case FRAMESIZE_QVGA:  return FRAMESIZE_QVGA;
+    case FRAMESIZE_CIF:   return FRAMESIZE_CIF;
+    case FRAMESIZE_VGA:   return FRAMESIZE_VGA;
+    case FRAMESIZE_SVGA:  return FRAMESIZE_SVGA;
+    case FRAMESIZE_XGA:   return FRAMESIZE_XGA;
+    case FRAMESIZE_SXGA:  return FRAMESIZE_SXGA;
+    case FRAMESIZE_UXGA:  return FRAMESIZE_UXGA;
+    default:              return FRAMESIZE_QQVGA;
+  }
+}
+
+String frameSizeLabel(int v) {
+  switch (v) {
+    case FRAMESIZE_QQVGA: return "QQVGA (160x120)";
+    case FRAMESIZE_QVGA:  return "QVGA (320x240)";
+    case FRAMESIZE_CIF:   return "CIF (400x296)";
+    case FRAMESIZE_VGA:   return "VGA (640x480)";
+    case FRAMESIZE_SVGA:  return "SVGA (800x600)";
+    case FRAMESIZE_XGA:   return "XGA (1024x768)";
+    case FRAMESIZE_SXGA:  return "SXGA (1280x1024)";
+    case FRAMESIZE_UXGA:  return "UXGA (1600x1200)";
+    default:              return "Unknown";
+  }
+}
+
+void applyFrameSize(int v) {
+  sensor_t *s = esp_camera_sensor_get();
+  if (s) {
+    s->set_framesize(s, intToFrameSize(v));
+    savedFrameSize = v;
+  }
+}
 
 // ===========================
 // LED helpers
@@ -116,14 +159,16 @@ void loadConfig() {
   prefs.begin("camcfg", true);
 
   pcHost = prefs.getString("host", "192.168.1.153");
-  pcPort = prefs.getInt("port", 8000);
+  pcPort = prefs.getInt("port", 8003);
   framePath = prefs.getString("frame", "/frame");
   pingPath = prefs.getString("ping", "/ping");
   streamingOn = prefs.getBool("stream", true);
   frameIntervalMs = prefs.getULong("frameMs", 250);
+  savedFrameSize = prefs.getInt("frameSize", FRAMESIZE_QQVGA);
 
   prefs.end();
 
+  applyFrameSize(savedFrameSize);
   rebuildUrls();
 }
 
@@ -136,6 +181,7 @@ void saveConfig() {
   prefs.putString("ping", pingPath);
   prefs.putBool("stream", streamingOn);
   prefs.putULong("frameMs", frameIntervalMs);
+  prefs.putInt("frameSize", savedFrameSize);
 
   prefs.end();
 
@@ -145,6 +191,20 @@ void saveConfig() {
 // ===========================
 // Web config page
 // ===========================
+String resolutionOptions() {
+  int sizes[] = {
+    FRAMESIZE_QQVGA, FRAMESIZE_QVGA, FRAMESIZE_CIF,
+    FRAMESIZE_VGA,   FRAMESIZE_SVGA, FRAMESIZE_XGA,
+    FRAMESIZE_SXGA,  FRAMESIZE_UXGA
+  };
+  String out = "";
+  for (int i = 0; i < 8; i++) {
+    String sel = (sizes[i] == savedFrameSize) ? " selected" : "";
+    out += "<option value='" + String(sizes[i]) + "'" + sel + ">" + frameSizeLabel(sizes[i]) + "</option>";
+  }
+  return out;
+}
+
 void handleConfigPage() {
   String checked = streamingOn ? "checked" : "";
 
@@ -154,11 +214,14 @@ void handleConfigPage() {
     "<title>ESP32 Camera Config</title>"
     "<style>"
     "body{font-family:Arial;margin:30px;background:#111;color:#eee;}"
-    "input{width:100%;padding:10px;margin:8px 0;background:#222;color:#fff;border:1px solid #555;}"
-    "button{padding:12px 20px;background:#2d7ef7;color:white;border:0;border-radius:6px;}"
-    ".card{max-width:520px;background:#1b1b1b;padding:20px;border-radius:10px;}"
+    "input,select{width:100%;padding:10px;margin:8px 0;background:#222;color:#fff;border:1px solid #555;border-radius:4px;box-sizing:border-box;}"
+    "button{padding:12px 20px;background:#2d7ef7;color:white;border:0;border-radius:6px;cursor:pointer;}"
+    ".card{max-width:520px;background:#1b1b1b;padding:20px;border-radius:10px;margin-bottom:20px;}"
     ".status{background:#222;padding:10px;margin-top:15px;border-radius:6px;}"
+    ""
     "</style></head><body>"
+
+    // Config card
     "<div class='card'>"
     "<h2>ESP32 Camera Config</h2>"
 
@@ -178,6 +241,9 @@ void handleConfigPage() {
     "Frame Interval ms:<br>"
     "<input name='frameMs' type='number' value='" + String(frameIntervalMs) + "'>"
 
+    "Resolution:<br>"
+    "<select name='frameSize'>" + resolutionOptions() + "</select><br><br>"
+
     "<label>"
     "<input type='checkbox' name='stream' " + checked + "> Streaming Enabled"
     "</label><br><br>"
@@ -193,9 +259,26 @@ void handleConfigPage() {
     "</div>"
 
     "<p><a style='color:#7ab7ff' href='/status'>JSON Status</a></p>"
-    "</div></body></html>";
+    "</div>"
+
+    ""
+
+    "</body></html>";
 
   server.send(200, "text/html", html);
+}
+
+void handleCapture() {
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    server.send(503, "text/plain", "Camera capture failed");
+    return;
+  }
+  server.sendHeader("Cache-Control", "no-cache, no-store");
+  server.setContentLength(fb->len);
+  server.send(200, "image/jpeg", "");
+  server.sendContent((const char*)fb->buf, fb->len);
+  esp_camera_fb_return(fb);
 }
 
 void handleSave() {
@@ -204,12 +287,13 @@ void handleSave() {
   if (server.hasArg("frame")) framePath = server.arg("frame");
   if (server.hasArg("ping")) pingPath = server.arg("ping");
   if (server.hasArg("frameMs")) frameIntervalMs = server.arg("frameMs").toInt();
+  if (server.hasArg("frameSize")) applyFrameSize(server.arg("frameSize").toInt());
 
   streamingOn = server.hasArg("stream");
 
   if (!framePath.startsWith("/")) framePath = "/" + framePath;
   if (!pingPath.startsWith("/")) pingPath = "/" + pingPath;
-  if (pcPort <= 0) pcPort = 8000;
+  if (pcPort <= 0) pcPort = 8003;
   if (frameIntervalMs < 100) frameIntervalMs = 100;
 
   saveConfig();
@@ -225,6 +309,7 @@ void handleStatus() {
   json += "\"pcFrameUrl\":\"" + pcFrameUrl + "\",";
   json += "\"pcPingUrl\":\"" + pcPingUrl + "\",";
   json += "\"frameIntervalMs\":" + String(frameIntervalMs) + ",";
+  json += "\"frameSize\":" + String(savedFrameSize) + ",";
   json += "\"espIp\":\"" + WiFi.localIP().toString() + "\"";
   json += "}";
 
@@ -234,6 +319,7 @@ void handleStatus() {
 void startConfigServer() {
   server.on("/", HTTP_GET, handleConfigPage);
   server.on("/config", HTTP_GET, handleConfigPage);
+  server.on("/capture", HTTP_GET, handleCapture);
   server.on("/save", HTTP_POST, handleSave);
   server.on("/status", HTTP_GET, handleStatus);
 
@@ -247,7 +333,7 @@ void startConfigServer() {
 bool checkPcConnected() {
   HTTPClient http;
   http.begin(pcPingUrl.c_str());
-  http.setTimeout(1000);
+  http.setTimeout(5000);
 
   int code = http.GET();
   http.end();
@@ -320,9 +406,8 @@ bool setupCamera() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
 
-  // Small packets
-  config.frame_size = FRAMESIZE_QQVGA;   // 160x120
-  config.jpeg_quality = 18;              // higher = smaller file
+  config.frame_size = intToFrameSize(savedFrameSize);
+  config.jpeg_quality = 10;
   config.fb_count = 1;
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
 
@@ -343,13 +428,6 @@ bool setupCamera() {
     return false;
   }
 
-  sensor_t *s = esp_camera_sensor_get();
-
-  if (s) {
-    s->set_framesize(s, FRAMESIZE_QQVGA);
-    s->set_quality(s, 18);
-  }
-
   Serial.println("[CAMERA] Initialized");
   return true;
 }
@@ -358,6 +436,7 @@ bool setupCamera() {
 // Main setup
 // ===========================
 void setup() {
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
   Serial.begin(115200);
   Serial.setDebugOutput(true);
   Serial.println();
@@ -369,6 +448,11 @@ void setup() {
   ledOff();
 
   Serial.println("[BOOT] Starting ESP32 camera streamer");
+
+  // Load frame size before camera init so buffer is allocated at the right size
+  prefs.begin("camcfg", true);
+  savedFrameSize = prefs.getInt("frameSize", FRAMESIZE_QQVGA);
+  prefs.end();
 
   if (!setupCamera()) {
     while (true) {
@@ -393,7 +477,7 @@ void setup() {
   Serial.print("[WIFI] ESP32 IP: ");
   Serial.println(WiFi.localIP());
 
-  loadConfig();
+  loadConfig();  // applies saved resolution
   startConfigServer();
 
   Serial.println("[READY] Open this in browser:");

@@ -1,7 +1,7 @@
 services:
   postgres:
     image: postgres:17-alpine
-    restart: unless-stopped
+    restart: always
     labels:
       - "esp32=true"
     environment:
@@ -22,15 +22,18 @@ services:
     build: .
     labels:
       - "esp32=true"
-    # host network: reaches ESP32 devices on LAN
-    network_mode: "host"
+    ports:
+      - "0.0.0.0:8003:8003"
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgres://esp32:esp32@localhost:5433/esp32_events}
+      DATABASE_URL: ${DATABASE_URL:-postgres://esp32:esp32@postgres:5432/esp32_events}
     volumes:
       - ./frames:/app/frames
       - ./outputs:/app/outputs
       - ./.env:/app/.env
-    restart: unless-stopped
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres-data:

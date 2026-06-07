@@ -17,3 +17,4 @@ camera_events.db
 # Model weights
 weights/
 *.pth
+.DS_Store
